@@ -139,6 +139,62 @@ export const stripeWebhook = async (req, res) => {
       return res.status(500).json({ message: "Internal Server Error" });
     }
   }
+
+  // Handle charge succeeded event
+  if (event.type === "charge.succeeded") {
+    console.log("charge.succeeded event received");
+
+    try {
+      const charge = event.data.object;
+      console.log("Charge metadata:", charge.metadata);
+
+      // Try to find purchase using metadata from the charge
+      const courseId = charge.metadata?.courseId;
+      const userId = charge.metadata?.userId;
+
+      if (courseId && userId) {
+        // Find the specific purchase for this user and course
+        const purchase = await CoursePurchase.findOne({
+          courseId: courseId,
+          userId: userId,
+          status: "pending"
+        }).populate({ path: "courseId" });
+
+        if (purchase && charge.status === "succeeded") {
+          purchase.status = "completed";
+
+          if (purchase.courseId && purchase.courseId.lectures.length > 0) {
+            await Lecture.updateMany(
+              { _id: { $in: purchase.courseId.lectures } },
+              { $set: { isPreviewFree: true } }
+            );
+          }
+
+          await purchase.save();
+
+          await User.findByIdAndUpdate(
+            purchase.userId,
+            { $addToSet: { enrolledCourses: purchase.courseId._id } },
+            { new: true }
+          );
+
+          await Course.findByIdAndUpdate(
+            purchase.courseId._id,
+            { $addToSet: { enrolledStudents: purchase.userId } },
+            { new: true }
+          );
+
+          console.log("Payment completed via charge.succeeded for purchase:", purchase._id);
+        } else {
+          console.log("No pending purchase found for user:", userId, "course:", courseId);
+        }
+      } else {
+        console.log("No metadata found in charge");
+      }
+    } catch (error) {
+      console.error("Error handling charge.succeeded:", error);
+    }
+  }
   res.status(200).send();
 };
 export const getCourseDetailWithPurchaseStatus = async (req, res) => {
